@@ -1,0 +1,24 @@
+# Wajah AI — First Try
+#
+# Langkah 1: Jalankan setup (sekali saja)
+#   python setup.py
+#
+# Langkah 2: Aktifkan virtual environment
+#   source venv/bin/activate        (Mac/Linux)
+#   venv\Scripts\activate           (Windows)
+#
+# Langkah 3: Jalankan dashboard
+#   python dashboard.py
+#
+# Langkah 4: Buka browser
+#   http://127.0.0.1:8000
+#
+# Langkah 5: Masukkan keyword (harus ada kata pria atau wanita)
+#   Contoh: pria face natural headshot close up plain background age 30 raw portrait
+#   Contoh: wanita face front view close up natural skin no makeup age 25
+#
+# Langkah 6: Masukkan jumlah gambar lalu klik Start
+#
+# Langkah 7: Review hasil di 3 tab (Approved / Rejected / Review)
+#
+# Langkah 8: Klik Finish setelah selesai review

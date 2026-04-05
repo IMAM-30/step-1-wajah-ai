@@ -1,0 +1,466 @@
+================================================================================
+                        WAJAH AI — SPESIFIKASI SISTEM
+              Intelligent Face Dataset Pipeline & Auto-Curation
+================================================================================
+
+
+1. RINGKASAN PROYEK
+================================================================================
+
+Wajah AI adalah sistem otomatis untuk membangun dataset wajah manusia berkualitas
+tinggi. Sistem ini melakukan pencarian gambar wajah dari internet, memfilter
+secara ketat, memotong menjadi 7 bagian wajah, lalu mengkurasi hasilnya
+menggunakan machine learning — dengan minimal intervensi manual.
+
+Tujuan akhir: menghasilkan dataset potongan wajah (hidung, mata, bibir, dagu,
+rambut, telinga, baju) yang terstruktur, bersih, dan siap digunakan untuk
+training model AI.
+
+
+2. ARSITEKTUR SISTEM
+================================================================================
+
+Program terdiri dari 4 modul utama:
+
+  dashboard.py      — Web UI (Flask), pusat kontrol seluruh sistem
+  scraper.py        — Multi-source scraper + 8-layer filter pipeline
+  smart_filter.py   — Machine Learning auto-curation (8 model)
+  batch_manager.py  — Batch management, naming, cycling, registry
+
+Pendukung:
+  data/pipelines/base_pipeline.py     — Base class untuk crop pipeline
+  data/pipelines/pria/*.py            — 7 pipeline crop pria
+  data/pipelines/wanita/*.py          — 7 pipeline crop wanita
+  data/models/age_*.caffemodel        — Age detection model (OpenCV DNN)
+  data/models/gender_*.caffemodel     — Gender detection model (OpenCV DNN)
+  data/models/smart_filter/*.pkl      — 8 trained ML models + 8 scalers
+  registry.xlsx                       — Anti-duplikasi URL tracking
+
+
+3. ALUR PROSES (FULL PIPELINE)
+================================================================================
+
+Seluruh proses dijalankan melalui dashboard web (http://127.0.0.1:8000).
+Satu kali proses lengkap terdiri dari 6 step otomatis + 1 step manual:
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │  USER: Masukkan keyword + jumlah gambar → Klik "Start"         │
+  │  Contoh: "pria face natural headshot close up age 30" limit=10 │
+  └────────────────────────┬────────────────────────────────────────┘
+                           │
+  ┌────────────────────────▼────────────────────────────────────────┐
+  │  STEP 1 — SCRAPE                                               │
+  │  Cari gambar dari 20 sumber internet (Pexels, Unsplash,        │
+  │  Pixabay, Openverse, StockSnap, dll)                           │
+  │  Filter 8 layer: wajah, frontal, gender, usia, AI, hash, dll   │
+  │  Output: gambar mentah di data/raw_images/                     │
+  └────────────────────────┬────────────────────────────────────────┘
+                           │
+  ┌────────────────────────▼────────────────────────────────────────┐
+  │  STEP 2 — MOVE TO RAW APPROVED                                 │
+  │  Pindahkan gambar ke data/raw_approved/{gender}/{age_group}/   │
+  │  Routing otomatis berdasarkan gender dan usia terdeteksi       │
+  └────────────────────────┬────────────────────────────────────────┘
+                           │
+  ┌────────────────────────▼────────────────────────────────────────┐
+  │  STEP 3 — PIPELINE CROP                                        │
+  │  14 pipeline (7 pria + 7 wanita) memotong setiap gambar        │
+  │  menjadi 7 bagian: hidung, mata, bibir, dagu, rambut,         │
+  │  telinga, baju                                                  │
+  │  Output: potongan di data/pipelines/{gender}/.staging_{part}/  │
+  └────────────────────────┬────────────────────────────────────────┘
+                           │
+  ┌────────────────────────▼────────────────────────────────────────┐
+  │  STEP 4 — START PIPELINE SERVERS                               │
+  │  Jalankan serve untuk preview gambar di dashboard               │
+  │  Setiap pipeline punya port sendiri (6001-6107)                │
+  └────────────────────────┬────────────────────────────────────────┘
+                           │
+  ┌────────────────────────▼────────────────────────────────────────┐
+  │  STEP 5 — SMART FILTER (ML AUTO-CURATION)                     │
+  │  8 model ML otomatis menilai setiap potongan:                  │
+  │    confidence >= 0.75  →  AUTO-APPROVE (langsung ke batch)     │
+  │    confidence <= 0.25  →  AUTO-REJECT  (langsung dibuang)      │
+  │    0.25 < conf < 0.75  →  REVIEW      (tunggu review manual)  │
+  └────────────────────────┬────────────────────────────────────────┘
+                           │
+  ┌────────────────────────▼────────────────────────────────────────┐
+  │  STEP 6 — CLEAN RAW                                            │
+  │  Bersihkan folder raw_approved setelah crop selesai            │
+  └────────────────────────┬────────────────────────────────────────┘
+                           │
+  ┌────────────────────────▼────────────────────────────────────────┐
+  │  STEP 7 — REVIEW MANUAL (USER)                                 │
+  │  Dashboard menampilkan 3 tab:                                   │
+  │    [Approved] — Gambar yang di-approve (ML + manual)           │
+  │    [Rejected] — Gambar yang di-reject (ML + manual)            │
+  │    [Review]   — Gambar yang butuh keputusan manual             │
+  │                                                                 │
+  │  Setiap tab punya sub-navigasi per bagian wajah:               │
+  │    hidung | mata | bibir | dagu | rambut | telinga | baju      │
+  │  Masing-masing menampilkan jumlah gambar.                      │
+  │                                                                 │
+  │  User bisa:                                                     │
+  │    - Approve/Reject per gambar (tombol individual)             │
+  │    - Bulk select + approve/reject (checkbox + batch action)    │
+  │    - Koreksi: pindah approved→rejected atau sebaliknya         │
+  │    - Klik gambar untuk zoom (modal fullscreen)                 │
+  │                                                                 │
+  │  Hanya gambar dari sesi proses saat ini yang ditampilkan.      │
+  └────────────────────────┬────────────────────────────────────────┘
+                           │
+  ┌────────────────────────▼────────────────────────────────────────┐
+  │  FINISH                                                         │
+  │  - Stop semua pipeline server                                   │
+  │  - Jika ada >= 50 data baru → auto re-train 8 model ML        │
+  │  - Kembali ke halaman utama, siap proses berikutnya            │
+  └─────────────────────────────────────────────────────────────────┘
+
+
+4. FITUR-FITUR DETAIL
+================================================================================
+
+4.1  MULTI-SOURCE SCRAPER (scraper.py)
+─────────────────────────────────────────
+
+  Sumber gambar (20 sumber):
+    API:     Pexels, Unsplash, Pixabay, Openverse
+    Scrape:  StockSnap, Wallhaven, Burst, Nappy, Pixnio, Negative Space,
+             ISO Republic, Wikimedia, Barnimages, Startup Stock, Picjumbo,
+             ShotStash, Iwaria, RandomUser, ThisPersonDoesNotExist, Bing
+
+  Pagination per sumber:
+    Pexels    — 7 halaman x 40  = max 280 URL
+    Unsplash  — 5 halaman x 30  = max 150 URL
+    Pixabay   — 5 halaman x 40  = max 200 URL
+    Openverse — 4 halaman x 20  = max 80 URL
+
+  Query rotation:
+    13 variasi query per gender, di-rotate setiap round.
+    Contoh wanita: "before botox face natural woman close up",
+    "woman passport photo style face", dll.
+
+  Multiplier: x6 (minta 5 gambar → cari 30 kandidat per round)
+
+  Early stop: berhenti jika 3 round berturut-turut tidak ada URL baru.
+
+  Max rounds: 40
+
+
+4.2  FILTER PIPELINE — 7 LAYER
+─────────────────────────────────────────
+
+  Setiap gambar yang didownload melewati 7 filter berurutan:
+
+  Layer 1 — URL PRE-FILTER
+    Tolak URL dari domain yang diketahui bermasalah.
+
+  Layer 2 — URL DUPLICATE
+    Cek apakah URL sudah pernah dicoba (dari registry.xlsx).
+
+  Layer 3 — FACE VALIDATION (MediaPipe FaceMesh)
+    - Harus ada tepat 1 wajah (tidak 0, tidak >1)
+    - Ukuran wajah minimal 18% lebar gambar
+    - Front view: symmetry <= 0.18
+    - Tidak menoleh: turn ratio >= 0.50
+    - Wajah di tengah gambar (tolerance ±30%)
+
+  Layer 4 — GENDER VERIFICATION (OpenCV DNN)
+    Model: GilLevi AgeGender Caffe (gender_net.caffemodel, 44MB)
+    - Deteksi gender visual dari gambar
+    - Jika gender terdeteksi != gender yang diminta DAN confidence > 65%
+      → REJECT
+    - Mencegah gambar wanita masuk ke dataset pria dan sebaliknya
+
+  Layer 5 — AI-GENERATED DETECTION
+    Analisis tekstur gambar untuk mendeteksi gambar buatan AI:
+    - Laplacian variance (smoothness)
+    - Canny edge density
+    - Skor kumulatif >= 3 → terdeteksi AI
+    Threshold: smooth lap < 35, edge < 0.015
+
+  Layer 6 — HASH DUPLICATE (perceptual hash)
+    - Menggunakan imagehash (pHash)
+    - Bandingkan dengan semua hash yang tersimpan
+    - Hash distance < 4 → duplikat
+    - Hash dari gambar yang ditolak juga disimpan (mencegah re-download)
+
+  Layer 7 — AGE ESTIMATION (OpenCV DNN)
+    Model: GilLevi Age Caffe (age_net.caffemodel, 44MB)
+    Age buckets: (0-2), (4-6), (8-12), (15-20), (25-32), (38-43), (48-53), (60-100)
+    Routing:
+      0-12     → REJECT (terlalu muda)
+      15-20    → Cek confidence, jika adult probability > 60% → terima sebagai 25-39
+      25-32    → 25-39
+      38-43    → Borderline, cek probability → 25-39 atau 40-65
+      48-100   → 40-65
+
+
+4.3  PIPELINE CROP — 14 PIPELINE
+─────────────────────────────────────────
+
+  Base class: data/pipelines/base_pipeline.py
+  Menggunakan MediaPipe FaceMesh (468 landmark points) untuk mendeteksi
+  dan memotong bagian wajah secara presisi.
+
+  7 bagian per gender (pria + wanita = 14 pipeline):
+
+    hidung   — Area segitiga hidung dari landmark
+    mata     — Kedua mata + area sekitar
+    bibir    — Bibir atas + bawah
+    dagu     — Area dagu dan rahang bawah
+    rambut   — Area atas kepala (rambut)
+    telinga  — Area samping kiri + kanan
+    baju     — Area bahu dan pakaian (di bawah dagu)
+
+  Setiap pipeline memiliki 2 mode:
+    --process  → Crop gambar dari raw_approved ke staging
+    --serve    → Jalankan Flask server untuk preview gambar (port unik)
+
+
+4.4  SMART FILTER — ML AUTO-CURATION (smart_filter.py)
+─────────────────────────────────────────
+
+  Algoritma: GradientBoostingClassifier (scikit-learn)
+  Konfigurasi: 100 estimators, max_depth=4, learning_rate=0.1
+
+  8 Model:
+    1 general (semua potongan campur)
+    7 per-part (hidung, mata, bibir, dagu, rambut, telinga, baju)
+
+  12 Fitur Visual per gambar:
+    1.  brightness     — Mean luminance
+    2.  contrast       — Std luminance
+    3.  sharpness      — Laplacian variance
+    4.  edge_density   — Canny edge ratio
+    5.  saturation     — Mean HSV saturation
+    6.  value          — Mean HSV value
+    7.  aspect_ratio   — Width/height ratio
+    8.  area_mpx       — Area dalam megapixels
+    9.  dark_ratio     — Rasio pixel gelap (< 30)
+    10. bright_ratio   — Rasio pixel terang (> 230)
+    11. hue_std        — Std deviasi hue (keragaman warna)
+    12. blur_score     — Inverse sharpness (normalized)
+
+  3 Tier Output:
+    confidence >= 0.75  →  AUTO-APPROVE
+    0.25 < conf < 0.75  →  REVIEW (manual)
+    confidence <= 0.25  →  AUTO-REJECT
+
+  Akurasi terakhir (trained dari 2231 data):
+    general   87.1%
+    hidung    87.4%
+    mata      86.7%
+    bibir     87.8%
+    dagu      88.8%
+    rambut    88.8%
+    telinga   83.1%
+    baju      82.3%
+
+  Auto Re-train:
+    - Counter disimpan ke file (persistent, tidak reset saat restart)
+    - Setiap kali Finish, cek jika data baru >= 50 → re-train semua model
+    - Model makin akurat seiring penggunaan
+
+
+4.5  BATCH MANAGER (batch_manager.py)
+─────────────────────────────────────────
+
+  Struktur output:
+    data/dataset/batch_N/{gender}/{age_group}/approved/{part}/
+    data/dataset/batch_N/{gender}/{age_group}/reject/{part}/
+
+  Aturan:
+    - Setiap batch max 100 gambar
+    - Jika penuh, overflow ke batch berikutnya (fill remaining dulu)
+    - Batch numbering: cycling 1→2→...→10→1→2→...
+    - Max 5 batch aktif — batch tertua otomatis dihapus
+    - Registry Excel TIDAK PERNAH dihapus (anti-duplikasi permanen)
+
+  Auto-naming:
+    {gender}_{age_group}_{part}_{NNN}.jpg
+    Contoh: pria_25-39_hidung_001.jpg
+
+  Registry Excel (11 kolom):
+    no, filename, url, source, query, gender, age_group,
+    status, batch, batch_filename, created_at
+
+
+4.6  DASHBOARD UI (dashboard.py)
+─────────────────────────────────────────
+
+  Framework: Flask (Python)
+  Port: 8000 (http://127.0.0.1:8000)
+  Design: Dark theme, glassmorphic, responsive
+
+  Halaman Utama:
+    - Input keyword pencarian
+    - Input jumlah gambar
+    - Tombol Start
+    - Progress log real-time (step 1-6)
+    - Tombol "Review Images" setelah selesai
+
+  Halaman Review:
+    3 Tab Utama:
+      [Approved] — Hijau, gambar yang di-approve
+      [Rejected] — Merah, gambar yang di-reject
+      [Review]   — Kuning, gambar menunggu keputusan
+
+    Sub-Navigasi per Part:
+      hidung (N) | mata (N) | bibir (N) | dagu (N) | ...
+      N = jumlah gambar di kategori tersebut
+
+    Fitur:
+      - Grid gambar dengan thumbnail
+      - Tombol Approve/Reject per gambar
+      - Bulk select (checkbox) + batch approve/reject
+      - Klik gambar untuk zoom (modal fullscreen)
+      - Summary banner: auto-approved / auto-rejected / need review
+      - Hanya tampilkan gambar dari sesi proses saat ini
+      - Pagination (12 gambar per halaman)
+
+    Tombol Aksi:
+      [Home]   — Kembali ke halaman utama
+      [Finish] — Selesai review, trigger re-train ML, kembali ke Home
+
+
+4.7  PROCESS MANAGEMENT
+─────────────────────────────────────────
+
+  Startup Cleanup:
+    - Kill semua orphan process dari sesi sebelumnya (by PID + by port)
+    - Reset state ke bersih
+
+  Signal Handler:
+    - SIGTERM / SIGINT (Ctrl+C) → kill semua child process → exit bersih
+    - atexit handler sebagai safety net
+
+  Port Management:
+    - Sebelum spawn pipeline server, force-free port dulu
+    - Kill by PID + kill by port (catch orphan)
+    - use_reloader=False — satu proses Flask saja (tidak double)
+
+  Pipeline Serve:
+    - Setiap pipeline punya port unik (6001-6107)
+    - Otomatis start saat proses, stop saat Finish
+    - Child PID di-track untuk cleanup
+
+
+4.8  ANTI-DUPLIKASI — 3 LAYER
+─────────────────────────────────────────
+
+  Layer 1 — URL Check:
+    Setiap URL dicatat di registry.xlsx.
+    URL yang sudah pernah dicoba → langsung skip (tidak download).
+
+  Layer 2 — Perceptual Hash:
+    Setiap gambar yang didownload di-hash (pHash).
+    Dibandingkan dengan semua hash tersimpan (termasuk dari gambar yang ditolak).
+    Hash distance < 4 → duplikat.
+    Mencegah gambar identik dari URL berbeda (misal sama foto di Pexels dan Pixabay).
+
+  Layer 3 — Registry:
+    File registry.xlsx menyimpan semua URL yang pernah diproses.
+    Tidak pernah dihapus, bertambah terus sebagai database anti-duplikasi permanen.
+
+
+5. DEPENDENCIES
+================================================================================
+
+  flask              — Web framework
+  opencv-python      — Computer vision, DNN models
+  numpy              — Numerical computing
+  pandas             — Data manipulation, Excel I/O
+  openpyxl           — Excel file support
+  scikit-learn       — Machine learning (GradientBoosting)
+  joblib             — Model serialization
+  mediapipe          — FaceMesh (468 landmark detection)
+  requests           — HTTP client untuk scraping
+  imagehash          — Perceptual hashing anti-duplikasi
+  Pillow             — Image processing
+
+
+6. STRUKTUR FOLDER
+================================================================================
+
+  wajah_ai/
+  ├── dashboard.py                    — Web UI pusat kontrol
+  ├── scraper.py                      — Multi-source scraper + filter
+  ├── smart_filter.py                 — ML auto-curation
+  ├── batch_manager.py                — Batch management
+  ├── registry.xlsx                   — Anti-duplikasi database
+  ├── requirements.txt                — Dependencies
+  ├── data/
+  │   ├── models/
+  │   │   ├── age_deploy.prototxt     — Age model config
+  │   │   ├── age_net.caffemodel      — Age model (44MB)
+  │   │   ├── gender_deploy.prototxt  — Gender model config
+  │   │   ├── gender_net.caffemodel   — Gender model (44MB)
+  │   │   └── smart_filter/
+  │   │       ├── model_general.pkl   — ML model general
+  │   │       ├── model_hidung.pkl    — ML model hidung
+  │   │       ├── model_mata.pkl      — ML model mata
+  │   │       ├── model_bibir.pkl     — ML model bibir
+  │   │       ├── model_dagu.pkl      — ML model dagu
+  │   │       ├── model_rambut.pkl    — ML model rambut
+  │   │       ├── model_telinga.pkl   — ML model telinga
+  │   │       ├── model_baju.pkl      — ML model baju
+  │   │       └── scaler_*.pkl        — 8 StandardScaler per model
+  │   ├── pipelines/
+  │   │   ├── base_pipeline.py        — Base class
+  │   │   ├── pria/                   — 7 pipeline pria
+  │   │   │   ├── pria-hidung.py
+  │   │   │   ├── pria-mata.py
+  │   │   │   ├── pria-bibir.py
+  │   │   │   ├── pria-dagu.py
+  │   │   │   ├── pria-rambut.py
+  │   │   │   ├── pria-telinga.py
+  │   │   │   └── pria-baju.py
+  │   │   └── wanita/                 — 7 pipeline wanita
+  │   │       ├── wanita-hidung.py
+  │   │       ├── wanita-mata.py
+  │   │       ├── wanita-bibir.py
+  │   │       ├── wanita-dagu.py
+  │   │       ├── wanita-rambut.py
+  │   │       ├── wanita-telinga.py
+  │   │       └── wanita-baju.py
+  │   ├── raw_images/                 — Temporary download
+  │   ├── raw_approved/               — Temporary setelah filter
+  │   └── dataset/                    — Output final
+  │       └── batch_N/
+  │           └── {gender}/
+  │               └── {age_group}/
+  │                   ├── approved/
+  │                   │   └── {part}/ — Gambar approved
+  │                   └── reject/
+  │                       └── {part}/ — Gambar rejected
+  └── docs/
+      ├── model muka.pdf              — Referensi model wajah
+      └── referensi_thoriq/           — Script referensi awal
+
+
+7. CATATAN TEKNIS
+================================================================================
+
+  - Gender detection menggunakan threshold confidence > 65%. Di bawah itu
+    dianggap ambigu dan tetap diterima. Ini karena potongan kecil (crop
+    bibir, telinga) kadang sulit dibedakan gender-nya.
+
+  - Smart Filter ML sudah trained dari 2231 data dengan akurasi 82-88%.
+    Model akan makin akurat seiring penggunaan karena auto re-train setiap
+    50 data baru masuk.
+
+  - Batch auto-cycling aktif: max 5 batch, cycling nomor 1-10. Batch
+    tertua otomatis dihapus, tapi registry Excel tetap utuh.
+
+  - Scraper menggunakan API key untuk Pexels, Unsplash, dan Pixabay.
+    Key sudah tertanam di kode. Jika rate-limited, ganti dengan key baru.
+
+  - Dashboard menggunakan port 8000. Pipeline servers menggunakan
+    port 6001-6107. Pastikan port ini tersedia.
+
+
+================================================================================
+                          Wajah AI — v1.0 (April 2026)
+             Dikembangkan oleh Imam Hudzaifah & Claude Code AI
+================================================================================
